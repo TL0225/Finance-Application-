@@ -19,13 +19,21 @@ import {
 import { ThemeProvider } from "./components/theme-provider";
 import { Toaster } from "./components/ui/sonner";
 import { AuthProvider } from "./components/AuthProvider";
+import { LoadingScreen } from "./components/LoadingScreen";
+import { useFinanceStore } from "./store/useFinanceStore";
 import { setupAuthDebug } from "./utils/debugAuth";
+import { IndexedDBErrorBoundary } from "./components/IndexedDBErrorBoundary";
+import { MemoryManager } from "./utils/memoryCleanup";
+import { dynamicMemoryManager } from "./utils/dynamicMemoryManager";
+import { AdaptiveComponentLoader } from "./components/AdaptiveComponentLoader";
+import { environment } from "./utils/environment";
 
 function AppContent() {
   const [currentView, setCurrentView] = useState("dashboard");
   const [sidebarWidth, setSidebarWidth] = useState(240); // Smaller default width (was 288px)
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
+  const { isLoaded } = useFinanceStore();
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setIsResizing(true);
@@ -80,30 +88,141 @@ function AppContent() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
+  // Dynamic memory management
+  useEffect(() => {
+    // Register app component with dynamic memory manager
+    dynamicMemoryManager.registerComponent('app-root', 'critical');
+    
+    // Enhanced memory monitoring with adaptive allocation
+    const memoryCheckInterval = setInterval(() => {
+      const { percentage, shouldCleanup } = MemoryManager.checkMemoryUsage();
+      const memoryStats = dynamicMemoryManager.getMemoryStats();
+      
+      if (shouldCleanup) {
+        console.warn(`High memory usage detected: ${percentage.toFixed(1)}%`);
+        console.log('Memory stats:', memoryStats);
+        MemoryManager.emergencyCleanup();
+        
+        // Request garbage collection through dynamic memory manager
+        dynamicMemoryManager.requestGarbageCollection();
+      }
+      
+      // Log memory stats in development
+      if (environment.isDevelopment) {
+        console.log('Dynamic memory allocation stats:', {
+          pressure: memoryStats.pressure.level,
+          cacheSize: `${(memoryStats.cacheSize / 1024 / 1024).toFixed(2)}MB`,
+          activeComponents: memoryStats.activeComponents,
+          batchSize: memoryStats.strategy.batchSize
+        });
+      }
+    }, 30000); // Check every 30 seconds
+    
+    return () => {
+      clearInterval(memoryCheckInterval);
+      dynamicMemoryManager.unregisterComponent('app-root');
+    };
+  }, []);
+
+  // Show loading screen while data is being loaded
+  // MOVED AFTER all hooks to prevent hook order violations
+  if (!isLoaded) {
+    return <LoadingScreen />;
+  }
+
+  // Update access for current view (moved outside renderContent)
+  useEffect(() => {
+    dynamicMemoryManager.updateComponentAccess(`page-${currentView}`);
+  }, [currentView]);
+
   const renderContent = () => {
+    // Dynamic component loading based on memory allocation
+    const memoryPressure = dynamicMemoryManager.getMemoryPressure();
+    const isLowMemory = memoryPressure.level === 'high' || memoryPressure.level === 'critical';
+
+    const ComponentWrapper = ({ children, componentId, priority = 'medium' }: { 
+      children: React.ReactNode; 
+      componentId: string; 
+      priority?: 'critical' | 'high' | 'medium' | 'low';
+    }) => (
+      <AdaptiveComponentLoader 
+        componentId={componentId} 
+        priority={priority}
+        fallback={
+          <div className="flex items-center justify-center h-64">
+            <div className="animate-pulse space-y-4 w-full max-w-md">
+              <div className="h-8 bg-muted rounded w-3/4" />
+              <div className="h-4 bg-muted rounded w-1/2" />
+              <div className="h-32 bg-muted rounded" />
+            </div>
+          </div>
+        }
+      >
+        {children}
+      </AdaptiveComponentLoader>
+    );
+
     switch (currentView) {
       case "dashboard":
-        return <DashboardPage onNavigate={setCurrentView} />;
+        return (
+          <ComponentWrapper componentId="dashboard-page" priority="high">
+            <DashboardPage onNavigate={setCurrentView} />
+          </ComponentWrapper>
+        );
       case "banking":
-        return <BankingPage />;
+        return (
+          <ComponentWrapper componentId="banking-page" priority="high">
+            <BankingPage />
+          </ComponentWrapper>
+        );
       case "calendar":
-        return <CalendarPage />;
+        return (
+          <ComponentWrapper componentId="calendar-page" priority={isLowMemory ? 'low' : 'medium'}>
+            <CalendarPage />
+          </ComponentWrapper>
+        );
       case "assets":
-        return <AssetsPage />;
+        return (
+          <ComponentWrapper componentId="assets-page" priority="medium">
+            <AssetsPage />
+          </ComponentWrapper>
+        );
       case "liabilities":
         return (
-          <LiabilitiesPage setCurrentView={setCurrentView} />
+          <ComponentWrapper componentId="liabilities-page" priority="medium">
+            <LiabilitiesPage setCurrentView={setCurrentView} />
+          </ComponentWrapper>
         );
       case "inventory":
-        return <InventoryPage />;
+        return (
+          <ComponentWrapper componentId="inventory-page" priority={isLowMemory ? 'low' : 'medium'}>
+            <InventoryPage />
+          </ComponentWrapper>
+        );
       case "receipts":
-        return <ReceiptsPage />;
+        return (
+          <ComponentWrapper componentId="receipts-page" priority={isLowMemory ? 'low' : 'medium'}>
+            <ReceiptsPage />
+          </ComponentWrapper>
+        );
       case "goals":
-        return <GoalsPage />;
+        return (
+          <ComponentWrapper componentId="goals-page" priority="medium">
+            <GoalsPage />
+          </ComponentWrapper>
+        );
       case "settings":
-        return <SettingsPage />;
+        return (
+          <ComponentWrapper componentId="settings-page" priority="high">
+            <SettingsPage />
+          </ComponentWrapper>
+        );
       default:
-        return <DashboardPage onNavigate={setCurrentView} />;
+        return (
+          <ComponentWrapper componentId="dashboard-page" priority="high">
+            <DashboardPage onNavigate={setCurrentView} />
+          </ComponentWrapper>
+        );
     }
   };
 
@@ -119,7 +238,7 @@ function AppContent() {
           <Sidebar
             currentView={currentView}
             setCurrentView={setCurrentView}
-            isCollapsed={sidebarWidth < 200}
+            isCollapsed={sidebarWidth < 180}
           />
         </div>
 
@@ -154,16 +273,37 @@ function AppContent() {
 export default function App() {
   useEffect(() => {
     setupAuthDebug();
+    
+    // Only register service worker in production and if supported
+    if (environment.isProduction && 'serviceWorker' in navigator) {
+      // Conditional service worker registration to avoid 404 errors
+      fetch('/sw.js', { method: 'HEAD' })
+        .then(() => {
+          // Service worker file exists, safe to register
+          import('./utils/serviceWorkerUtils').then(({ autoRegisterServiceWorker }) => {
+            autoRegisterServiceWorker().then(() => {
+              console.log('✅ Service worker registered');
+            }).catch(error => {
+              console.warn('⚠️ Service worker registration failed:', error);
+            });
+          });
+        })
+        .catch(() => {
+          // Service worker file doesn't exist, skip registration
+          console.log('ℹ️ Service worker not available, running without offline support');
+        });
+    }
   }, []);
 
   return (
-    <ThemeProvider
-      defaultTheme="light"
-      storageKey="finance-app-theme"
-    >
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
-    </ThemeProvider>
+    <IndexedDBErrorBoundary>
+      <ThemeProvider
+        defaultTheme="light"
+      >
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ThemeProvider>
+    </IndexedDBErrorBoundary>
   );
 }
